@@ -11,7 +11,11 @@ import {
   callOpenRouter,
   stripFences,
 } from "../lib/openrouter.js";
-import { evaluateExpression } from "../lib/evaluate.js";
+import {
+  evaluateComputedColumns,
+  formatDateValue,
+  toBoolean,
+} from "../lib/evaluate.js";
 
 const tools = new Hono();
 
@@ -98,6 +102,22 @@ function gridToRows(
   });
 }
 
+/**
+ * expr-eval is not JavaScript. Spelling this out stops the model reaching for
+ * `&&` / `||` / `!`, which are parse errors and render as blank cells.
+ */
+const EXPRESSION_RULES = `Expression language (expr-eval — NOT JavaScript):
+- Arithmetic: + - * / % ^ and parentheses
+- Comparison: == != < <= > >=
+- Boolean operators are the WORDS "and", "or", "not". Never use && || !
+- Conditionals use the ternary form: condition ? valueIfTrue : valueIfFalse
+- Functions allowed: min, max, abs, round, ceil, floor
+- String equality must be quoted: serviceType == "AC Repair"
+- A boolean field is already true/false — write "rushJob and completed", NOT "rushJob == \\"Yes\\""
+- An expression may reference field ids AND the ids of other computed columns
+  (e.g. rushSurcharge can use totalCost). Define a column before the ones that use it.
+- Never reference a column that does not exist, and never let a column reference itself.`;
+
 const SYSTEM_PROMPT = `You are an operations analyst. Given a raw spreadsheet grid (first row = headers, remaining rows = data), infer a ToolSchema JSON object for a small business internal tool.
 
 Rules:
@@ -134,7 +154,9 @@ Type inference rules:
 - If values are yes/no/true/false → "boolean"
 - Otherwise → "text"
 
-Propose 1–3 useful computed columns. Expressions MUST use only field ids from the fields array and operators/functions listed above.`;
+${EXPRESSION_RULES}
+
+Propose 1–3 useful computed columns.`;
 
 async function callAndParse(
   messages: Parameters<typeof callOpenRouter>[0]
@@ -317,7 +339,9 @@ You are given the current schema as JSON and a plain-language instruction.
 Return the COMPLETE updated ToolSchema as JSON only — no prose, no fences.
 Preserve all existing fields and computed columns unless the instruction implies changing them.
 Keep ids stable for unchanged items. The top-level "id" field must remain unchanged.
-New computed expressions must be valid for expr-eval (operators + - * / , comparisons, parens, functions min/max/abs/round only) and may only reference existing field or computed ids.`;
+A new computed column must be appended AFTER any column it references.
+
+${EXPRESSION_RULES}`;
 
 // POST /api/tools/:id/edit — real NL schema edit via OpenRouter
 tools.post("/:id/edit", async (c) => {
@@ -422,20 +446,36 @@ tools.get("/:id/export", (c) => {
 
   const lines: string[] = [headers.map(csvCell).join(",")];
 
+  const fieldTypes = Object.fromEntries(
+    schema.fields.map((f) => [f.id, f.type])
+  );
+
   for (const row of rows) {
+    // Mirrors the table: computed columns may build on one another.
+    const computedValues = evaluateComputedColumns(
+      schema.computed,
+      row,
+      fieldTypes
+    );
     const cells = [
       ...schema.fields.map((f) => {
         const v = row[f.id];
         if (f.type === "currency") return csvCell(`$${Number(v).toFixed(2)}`);
         if (f.type === "percent") return csvCell(`${v}%`);
+        if (f.type === "boolean") {
+          const b = toBoolean(v);
+          return csvCell(b === null ? v : b ? "Yes" : "No");
+        }
+        if (f.type === "date") return csvCell(formatDateValue(v) ?? v);
         return csvCell(v);
       }),
       ...schema.computed.map((comp) => {
-        const result = evaluateExpression(comp.expression, row);
+        const result = computedValues[comp.id];
         if (result === null || result === undefined) return "";
         if (comp.type === "currency") return csvCell(`$${Number(result).toFixed(2)}`);
         if (comp.type === "percent") return csvCell(`${result}%`);
-        if (comp.type === "boolean") return csvCell(result ? "Yes" : "No");
+        if (comp.type === "boolean")
+          return csvCell((toBoolean(result) ?? Boolean(result)) ? "Yes" : "No");
         if (comp.type === "number") {
           const n = Number(result);
           return csvCell(Number.isInteger(n) ? String(n) : n.toFixed(2));

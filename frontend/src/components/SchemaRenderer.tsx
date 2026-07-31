@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ToolSchema, FieldType } from "@opsmith/shared";
 import {
   Table,
@@ -14,7 +14,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { evaluateExpression } from "@/lib/evaluate";
+import {
+  evaluateComputedColumns,
+  formatDateValue,
+  toBoolean,
+} from "@/lib/evaluate";
 import { cn } from "@/lib/utils";
 import { FunctionSquare, Inbox } from "lucide-react";
 
@@ -44,7 +48,12 @@ function formatFieldValue(value: unknown, type: FieldType | undefined): string {
       return `$${n.toFixed(2)}`;
     }
     if (type === "percent") return `${value}%`;
-    if (type === "boolean") return value ? "Yes" : "No";
+    if (type === "boolean") {
+      const b = toBoolean(value);
+      // Unrecognised values are shown as-is rather than guessed into Yes/No.
+      return b === null ? String(value) : b ? "Yes" : "No";
+    }
+    if (type === "date") return formatDateValue(value) ?? String(value);
     if (type === "number") {
       const n = Number(value);
       if (!isFinite(n)) return "—";
@@ -91,7 +100,7 @@ function ComputedCell({
     return <span className="text-muted-foreground/60">—</span>;
   }
   if (type === "boolean") {
-    const yes = Boolean(value);
+    const yes = toBoolean(value) ?? Boolean(value);
     return (
       <Badge dot size="sm" variant={yes ? "success" : "soft"}>
         {yes ? "Yes" : "No"}
@@ -135,6 +144,13 @@ export function SchemaRenderer({
   const truncated = rows.length > ROW_LIMIT;
   const totalCols = schema.fields.length + schema.computed.length;
   const scroller = useOverflowRight();
+
+  /* Declared types let the evaluator read "No" as false rather than as a
+     non-empty (and therefore truthy) string. */
+  const fieldTypes = useMemo(
+    () => Object.fromEntries(schema.fields.map((f) => [f.id, f.type])),
+    [schema.fields]
+  );
 
   /* First column pins on horizontal scroll so wide tools stay legible.
      Each site supplies its own background so the pinned cell keeps matching
@@ -246,7 +262,14 @@ export function SchemaRenderer({
                 </TableCell>
               </TableRow>
             ) : (
-              visibleRows.map((row, i) => (
+              visibleRows.map((row, i) => {
+                /* One pass per row: later columns can build on earlier ones. */
+                const computedValues = evaluateComputedColumns(
+                  schema.computed,
+                  row,
+                  fieldTypes
+                );
+                return (
                 <TableRow key={(row._rowId as number | undefined) ?? i}>
                   {schema.fields.map((field, fi) => {
                     const text = formatFieldValue(row[field.id], field.type);
@@ -273,7 +296,7 @@ export function SchemaRenderer({
                   })}
 
                   {schema.computed.map((c, ci) => {
-                    const result = evaluateExpression(c.expression, row);
+                    const result = computedValues[c.id];
                     const isNum = NUMERIC_TYPES.has(c.type);
                     return (
                       <TableCell
@@ -290,7 +313,8 @@ export function SchemaRenderer({
                     );
                   })}
                 </TableRow>
-              ))
+                );
+              })
             )}
           </TableBody>
         </Table>
