@@ -1,0 +1,16 @@
+{
+  "name": "@opsmith/shared",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./tool-schema.ts",
+  "exports": {
+    ".": "./tool-schema.ts"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}
